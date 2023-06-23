@@ -52,6 +52,18 @@ impl Default for ClientBuilder {
 }
 
 impl ClientBuilder {
+    // Sets the retry_policy for the ClientBuilder
+    pub fn with_retry_policy(mut self, policy: ExponentialBackoff) -> Self {
+        self.retry_policy = Some(policy);
+        self
+    }
+
+    // Sets the vendor_endpoint  for the ClientBuilder
+    pub fn with_vendor_endpoint(mut self, endpoint: Url) -> Self {
+        self.vendor_endpoint = endpoint;
+        self
+    }
+
     /// Creates a [`Client`] that incorporates the optional parameters
     /// configured on the builder and the specified required parameters.
     pub fn build(self, config: ClientConfig) -> Client {
