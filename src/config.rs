@@ -17,10 +17,9 @@ use std::time::Duration;
 
 use once_cell::sync::Lazy;
 use reqwest::Url;
-use reqwest_middleware::ClientWithMiddleware;
-use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
+use reqwest_retry::policies::ExponentialBackoff;
 
-use crate::Client;
+use crate::{client::ReqwestClientWrapper, Client};
 
 pub static DEFAULT_VENDOR_ENDPOINT: Lazy<Url> = Lazy::new(|| {
     "https://api.frontegg.com"
@@ -46,7 +45,12 @@ impl Default for ClientBuilder {
     fn default() -> ClientBuilder {
         ClientBuilder {
             vendor_endpoint: DEFAULT_VENDOR_ENDPOINT.clone(),
-            retry_policy: Some(ExponentialBackoff::builder().build_with_max_retries(5)),
+            retry_policy: Some(
+                ExponentialBackoff::builder()
+                    .retry_bounds(Duration::from_millis(100), Duration::from_secs(3))
+                    .backoff_exponent(3)
+                    .build_with_max_retries(5),
+            ),
         }
     }
 }
@@ -67,17 +71,12 @@ impl ClientBuilder {
     /// Creates a [`Client`] that incorporates the optional parameters
     /// configured on the builder and the specified required parameters.
     pub fn build(self, config: ClientConfig) -> Client {
-        let inner = reqwest::ClientBuilder::new()
+        let base_client = reqwest::ClientBuilder::new()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(60))
             .build()
             .unwrap();
-        let inner: ClientWithMiddleware = match self.retry_policy {
-            Some(policy) => reqwest_middleware::ClientBuilder::new(inner)
-                .with(RetryTransientMiddleware::new_with_policy(policy))
-                .build(),
-            None => reqwest_middleware::ClientBuilder::new(inner).build(),
-        };
+        let inner = ReqwestClientWrapper::new(base_client, self.retry_policy);
         Client {
             inner,
             client_id: config.client_id,

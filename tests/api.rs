@@ -26,8 +26,9 @@
 
 use std::collections::HashSet;
 use std::env;
+use wiremock::matchers::{method, path, path_regex};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
-// use futures::future::join_all;
 use futures::stream::TryStreamExt;
 use once_cell::sync::Lazy;
 use reqwest::StatusCode;
@@ -59,6 +60,53 @@ async fn delete_existing_tenants(client: &Client) {
             client.delete_tenant(tenant.id).await.unwrap();
         }
     }
+}
+
+#[test(tokio::test)]
+async fn test_retries_with_mock_server() {
+    // Used to test retry logic resolving retryable errors such as
+    // rate limits - maybe
+    let server = MockServer::start().await;
+    let client = Client::builder()
+        .with_vendor_endpoint(server.uri().parse().unwrap())
+        .build(ClientConfig {
+            client_id: String::from(""),
+            secret_key: String::from(""),
+        });
+
+    let mock = Mock::given(path("/auth/vendor"))
+        .and(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string("{\"token\":\"test\", \"expiresIn\":2687784526}"),
+        )
+        .expect(1)
+        .named("login");
+    server.register(mock).await;
+
+    let mock = Mock::given(method("GET"))
+        .and(path_regex("/tenants/.*"))
+        .respond_with(ResponseTemplate::new(429))
+        .expect(3..8) // somehow this isn't pegged at max retries ?
+        .named("get tenants");
+    server.register(mock).await;
+    let _ = client.get_tenant(Uuid::new_v4()).await;
+
+    let mock = Mock::given(method("POST"))
+        .and(path_regex("/tenants/.*"))
+        .respond_with(ResponseTemplate::new(429))
+        .expect(1)
+        .named("post tenants");
+    server.register(mock).await;
+    let _ = client
+        .create_tenant(&TenantRequest {
+            id: Uuid::new_v4(),
+            name: &format!("{TENANT_NAME_PREFIX} 1"),
+            metadata: json!({
+                "tenant_number": 1,
+            }),
+        })
+        .await;
 }
 
 #[test(tokio::test)]
@@ -121,13 +169,6 @@ async fn test_tenants_and_users() {
         Err(Error::Api(ApiError { status_code, .. })) if status_code == StatusCode::NOT_FOUND => (),
         _ => panic!("unexpected response: {tenant_result:?}"),
     };
-
-    // Used to test retry logic resolving retryable errors such as
-    // rate limits - maybe
-    // join_all((0..1000).map(|_| async {
-    //     client.get_tenant(tenants[0].id).await.unwrap();
-    // }))
-    // .await;
 
     // Create three users in each tenant.
     let mut users = vec![];

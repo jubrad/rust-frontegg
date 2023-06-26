@@ -17,6 +17,8 @@ use std::time::{Duration, SystemTime};
 
 use reqwest::{Method, Url};
 use reqwest_middleware::{ClientWithMiddleware, RequestBuilder};
+use reqwest_retry::policies::ExponentialBackoff;
+use reqwest_retry::RetryTransientMiddleware;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -39,7 +41,7 @@ const AUTH_VENDOR_PATH: [&str; 2] = ["auth", "vendor"];
 /// [`Arc`]: std::sync::Arc
 #[derive(Debug)]
 pub struct Client {
-    pub(crate) inner: ClientWithMiddleware,
+    pub(crate) inner: ReqwestClientWrapper,
     pub(crate) client_id: String,
     pub(crate) secret_key: String,
     pub(crate) vendor_endpoint: Url,
@@ -149,6 +151,35 @@ impl Client {
             refresh_at: SystemTime::now() + (Duration::from_secs(res.expires_in) / 2),
         });
         Ok(res.token)
+    }
+}
+
+/// A Client Wrapper which holds a retryable and non retryable client
+/// This allows retry behavior based on the HTTP method
+#[derive(Debug)]
+pub(crate) struct ReqwestClientWrapper {
+    retryable: ClientWithMiddleware,
+    non_retryable: ClientWithMiddleware,
+}
+
+impl ReqwestClientWrapper {
+    pub(crate) fn new(client: reqwest::Client, retry_policy: Option<ExponentialBackoff>) -> Self {
+        Self {
+            retryable: match retry_policy {
+                Some(policy) => reqwest_middleware::ClientBuilder::new(client.clone())
+                    .with(RetryTransientMiddleware::new_with_policy(policy))
+                    .build(),
+                None => reqwest_middleware::ClientBuilder::new(client.clone()).build(),
+            },
+            non_retryable: reqwest_middleware::ClientBuilder::new(client).build(),
+        }
+    }
+
+    pub(crate) fn request(&self, method: Method, url: Url) -> RequestBuilder {
+        match method {
+            Method::GET | Method::HEAD => self.retryable.request(method, url),
+            _ => self.non_retryable.request(method, url),
+        }
     }
 }
 
