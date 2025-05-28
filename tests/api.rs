@@ -38,7 +38,10 @@ use tracing::info;
 use uuid::Uuid;
 use wiremock::{matchers, Mock, MockServer, ResponseTemplate};
 
-use frontegg::{ApiError, Client, ClientConfig, Error, TenantRequest, UserListConfig, UserRequest};
+use frontegg::{
+    ApiError, Client, ClientConfig, Error, TenantRequest, UserListConfig, UserListPartConfig,
+    UserRequest,
+};
 
 pub static CLIENT_ID: Lazy<String> =
     Lazy::new(|| env::var("FRONTEGG_CLIENT_ID").expect("missing FRONTEGG_CLIENT_ID"));
@@ -48,10 +51,16 @@ pub static SECRET_KEY: Lazy<String> =
 const TENANT_NAME_PREFIX: &str = "test tenant";
 
 fn new_client() -> Client {
-    Client::new(ClientConfig {
-        client_id: CLIENT_ID.clone(),
-        secret_key: SECRET_KEY.clone(),
-    })
+    Client::builder()
+        .with_retry_policy(
+            ExponentialBackoff::builder()
+                .retry_bounds(Duration::from_millis(500), Duration::from_secs(20))
+                .build_with_max_retries(20),
+        )
+        .build(ClientConfig {
+            client_id: CLIENT_ID.clone(),
+            secret_key: SECRET_KEY.clone(),
+        })
 }
 
 async fn delete_existing_tenants(client: &Client) {
@@ -279,6 +288,22 @@ async fn test_tenants_and_users() {
             .await
             .unwrap();
         assert!(expected.difference(&actual).collect::<Vec<_>>().is_empty());
+    }
+
+    // Ensure that listing users parts works for a variety of sizes.
+    for (page_size, max_pages, starting_page) in [(1, 1, 0), (1, 2, 1), (1, 3, 0)] {
+        let pages: HashSet<_> = client
+            .list_users_part(
+                UserListPartConfig::default()
+                    .page_size(page_size as u64)
+                    .max_pages(max_pages as u64)
+                    .starting_page(starting_page),
+            )
+            .map_ok(|u| u.id)
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(pages.len(), max_pages);
     }
 
     // Ensure that the user list can be filtered to a single tenant.
